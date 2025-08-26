@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
 
+# Modelos Pydantic (mantém os existentes)
 class Produto(BaseModel):
     id: Optional[int] = None
     titulo: str
@@ -10,6 +11,9 @@ class Produto(BaseModel):
     categoria: str
     vendedor: str
     data_criacao: Optional[datetime] = None
+    
+    class Config:
+        orm_mode = True  # Para conversão SQLAlchemy -> Pydantic
 
 class ProdutoCreate(BaseModel):
     titulo: str = Field(..., min_length=3, max_length=100, description="Título do produto")
@@ -25,5 +29,4 @@ class ProdutoUpdate(BaseModel):
     categoria: Optional[str] = None
     vendedor: Optional[str] = Field(None, min_length=2, max_length=50)
 
-# Categorias permitidas
 CATEGORIAS_VALIDAS = ["Livros", "Eletrônicos", "Móveis", "Roupas", "Esportes", "Outros"]

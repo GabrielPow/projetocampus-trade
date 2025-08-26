@@ -3,7 +3,7 @@
 ### =================================
 
 ### IMPORTANTE: Substitua pela sua URL real!
-@azureUrl = https://campustrade-api-seunome.azurewebsites.net
+@azureUrl = https://campustradepow-c3caakc7b9hyesdp.brazilsouth-01.azurewebsites.net/
 
 ### 1. Verificar API online
 GET {{azureUrl}}/

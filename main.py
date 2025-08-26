@@ -1,9 +1,28 @@
-from fastapi import FastAPI, HTTPException
-from models import Produto, ProdutoCreate
-from datetime import datetime
-from typing import List
+from fastapi import FastAPI, HTTPException, Query, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from database import get_db, ProdutoTable, create_tables, populate_initial_data
+from models import Produto, ProdutoCreate, CATEGORIAS_VALIDAS
+from typing import List, Optional
+import os
 
-app = FastAPI(title="CampusTrade API", version="1.0.0")
+app = FastAPI(
+    title="CampusTrade API", 
+    version="2.0.0 (SQL)",
+    description="Marketplace Universitário com persistência SQL"
+)
+
+@app.on_event("startup")
+async def startup_event():
+    """Inicializar banco de dados"""
+    create_tables()
+    populate_initial_data()
+    
+    # Log do ambiente
+    if os.getenv("WEBSITE_INSTANCE_ID"):
+        print("Executando no Azure App Service")
+    else:
+        print("Executando localmente")
 
 # Base de dados temporária (em memória)
 produtos_db = []
@@ -11,16 +30,22 @@ next_id = 1
 
 @app.get("/")
 def root():
-    return {"message": "CampusTrade API - Marketplace Universitário"}
-
+    ambiente = "Azure" if os.getenv("WEBSITE_INSTANCE_ID") else "Local"
+    return {
+        "message": "CampusTrade API - Marketplace Universitário", 
+        "ambiente": ambiente,
+        "versao": "2.0.0 (SQL)",
+        "banco": "SQL Server" if not os.getenv("DATABASE_URL", "").startswith("sqlite") else "SQLite"
+    }
 @app.get("/produtos", response_model=List[Produto])
-def listar_produtos():
-    return produtos_db
+def listar_produtos(db: Session = Depends(get_db)):
+    """Listar todos os produtos"""
+    produtos = db.query(ProdutoTable).order_by(ProdutoTable.data_criacao.desc()).all()
+    return produtos
 
-@app.post("/produtos", response_model=Produto)
-def criar_produto(produto: ProdutoCreate):
-    global next_id
-    
+@app.post("/produtos", response_model=Produto, status_code=201)
+def criar_produto(produto: ProdutoCreate, db: Session = Depends(get_db)):
+    """Criar novo produto"""
     # Validar categoria
     if produto.categoria not in CATEGORIAS_VALIDAS:
         raise HTTPException(
@@ -28,18 +53,19 @@ def criar_produto(produto: ProdutoCreate):
             detail=f"Categoria inválida. Use uma destas: {', '.join(CATEGORIAS_VALIDAS)}"
         )
     
-    novo_produto = Produto(
-        id=next_id,
+    # Criar produto no banco
+    db_produto = ProdutoTable(
         titulo=produto.titulo,
         descricao=produto.descricao,
         preco=produto.preco,
         categoria=produto.categoria,
-        vendedor=produto.vendedor,
-        data_criacao=datetime.now()
+        vendedor=produto.vendedor
     )
-    produtos_db.append(novo_produto)
-    next_id += 1
-    return novo_produto
+    
+    db.add(db_produto)
+    db.commit()
+    db.refresh(db_produto)
+    return db_produto
 
 if __name__ == "__main__":
     import uvicorn
@@ -53,16 +79,11 @@ from typing import List, Optional
 # ... código existente da aula anterior ...
 
 @app.put("/produtos/{produto_id}", response_model=Produto)
-def atualizar_produto(produto_id: int, produto_atualizado: ProdutoCreate):
+def atualizar_produto(produto_id: int, produto_atualizado: ProdutoCreate, db: Session = Depends(get_db)):
     """Atualizar produto completo"""
     # Buscar produto existente
-    produto_index = None
-    for i, produto in enumerate(produtos_db):
-        if produto.id == produto_id:
-            produto_index = i
-            break
-    
-    if produto_index is None:
+    produto = db.query(ProdutoTable).filter(ProdutoTable.id == produto_id).first()
+    if not produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     
     # Validar categoria
@@ -72,37 +93,26 @@ def atualizar_produto(produto_id: int, produto_atualizado: ProdutoCreate):
             detail=f"Categoria inválida. Use uma destas: {', '.join(CATEGORIAS_VALIDAS)}"
         )
     
-    # Atualizar produto mantendo ID e data de criação
-    produto_original = produtos_db[produto_index]
-    produto_novo = Produto(
-        id=produto_original.id,
-        titulo=produto_atualizado.titulo,
-        descricao=produto_atualizado.descricao,
-        preco=produto_atualizado.preco,
-        categoria=produto_atualizado.categoria,
-        vendedor=produto_atualizado.vendedor,
-        data_criacao=produto_original.data_criacao
-    )
+    # Atualizar campos
+    produto.titulo = produto_atualizado.titulo
+    produto.descricao = produto_atualizado.descricao
+    produto.preco = produto_atualizado.preco
+    produto.categoria = produto_atualizado.categoria
+    produto.vendedor = produto_atualizado.vendedor
     
-    produtos_db[produto_index] = produto_novo
-    return produto_novo
+    db.commit()
+    db.refresh(produto)
+    return produto
 
 @app.delete("/produtos/{produto_id}")
-def deletar_produto(produto_id: int):
+def deletar_produto(produto_id: int, db: Session = Depends(get_db)):
     """Remover produto"""
-    global produtos_db
-    
-    # Buscar produto
-    produto_existe = False
-    for i, produto in enumerate(produtos_db):
-        if produto.id == produto_id:
-            produtos_db.pop(i)
-            produto_existe = True
-            break
-    
-    if not produto_existe:
+    produto = db.query(ProdutoTable).filter(ProdutoTable.id == produto_id).first()
+    if not produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     
+    db.delete(produto)
+    db.commit()
     return {"message": "Produto removido com sucesso"}
 
 @app.get("/produtos/buscar", response_model=List[Produto])
@@ -110,10 +120,11 @@ def buscar_produtos(
     categoria: Optional[str] = Query(None, description="Filtrar por categoria"),
     termo: Optional[str] = Query(None, min_length=2, description="Buscar no título ou descrição"),
     preco_min: Optional[float] = Query(None, ge=0, description="Preço mínimo"),
-    preco_max: Optional[float] = Query(None, ge=0, description="Preço máximo")
+    preco_max: Optional[float] = Query(None, ge=0, description="Preço máximo"),
+    db: Session = Depends(get_db)
 ):
     """Buscar produtos com filtros"""
-    resultados = produtos_db.copy()
+    query = db.query(ProdutoTable)
     
     # Filtrar por categoria
     if categoria:
@@ -122,25 +133,23 @@ def buscar_produtos(
                 status_code=422, 
                 detail=f"Categoria inválida. Use uma destas: {', '.join(CATEGORIAS_VALIDAS)}"
             )
-        resultados = [p for p in resultados if p.categoria == categoria]
+        query = query.filter(ProdutoTable.categoria == categoria)
     
     # Filtrar por termo de busca
     if termo:
-        termo_lower = termo.lower()
-        resultados = [
-            p for p in resultados 
-            if termo_lower in p.titulo.lower() or termo_lower in p.descricao.lower()
-        ]
+        query = query.filter(
+            (ProdutoTable.titulo.contains(termo)) | 
+            (ProdutoTable.descricao.contains(termo))
+        )
     
-    # Filtrar por preço mínimo
+    # Filtrar por preço
     if preco_min is not None:
-        resultados = [p for p in resultados if p.preco >= preco_min]
+        query = query.filter(ProdutoTable.preco >= preco_min)
     
-    # Filtrar por preço máximo
     if preco_max is not None:
-        resultados = [p for p in resultados if p.preco <= preco_max]
+        query = query.filter(ProdutoTable.preco <= preco_max)
     
-    return resultados
+    return query.order_by(ProdutoTable.data_criacao.desc()).all()
 
 @app.get("/categorias")
 def listar_categorias():
@@ -151,36 +160,43 @@ def listar_categorias():
     }
 
 @app.get("/produtos/estatisticas")
-def estatisticas_produtos():
-    """Estatísticas simples dos produtos"""
-    if not produtos_db:
+def estatisticas_produtos(db: Session = Depends(get_db)):
+    """Estatísticas dos produtos"""
+    # Total de produtos
+    total = db.query(ProdutoTable).count()
+    
+    if total == 0:
         return {
             "total_produtos": 0,
             "preco_medio": 0,
-            "categoria_mais_popular": None
+            "categoria_mais_popular": None,
+            "produtos_por_categoria": {}
         }
     
-    # Calcular estatísticas
-    total = len(produtos_db)
-    preco_medio = sum(p.preco for p in produtos_db) / total
+    # Preço médio
+    preco_medio = db.query(func.avg(ProdutoTable.preco)).scalar() or 0
     
-    # Categoria mais popular
-    categorias_count = {}
-    for produto in produtos_db:
-        categorias_count[produto.categoria] = categorias_count.get(produto.categoria, 0) + 1
+    # Produtos por categoria
+    categorias = db.query(
+        ProdutoTable.categoria, 
+        func.count(ProdutoTable.id).label('count')
+    ).group_by(ProdutoTable.categoria).all()
     
-    categoria_popular = max(categorias_count, key=categorias_count.get) if categorias_count else None
+    produtos_por_categoria = {cat.categoria: cat.count for cat in categorias}
+    categoria_mais_popular = max(produtos_por_categoria, key=produtos_por_categoria.get) if produtos_por_categoria else None
     
     return {
         "total_produtos": total,
-        "preco_medio": round(preco_medio, 2),
-        "categoria_mais_popular": categoria_popular,
-        "produtos_por_categoria": categorias_count
+        "preco_medio": round(float(preco_medio), 2),
+        "categoria_mais_popular": categoria_mais_popular,
+        "produtos_por_categoria": produtos_por_categoria
     }
 
+
 @app.get("/produtos/{produto_id}", response_model=Produto)
-def buscar_produto(produto_id: int):
-    produto = next((p for p in produtos_db if p.id == produto_id), None)
+def buscar_produto(produto_id: int, db: Session = Depends(get_db)):
+    """Buscar produto por ID"""
+    produto = db.query(ProdutoTable).filter(ProdutoTable.id == produto_id).first()
     if not produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     return produto
