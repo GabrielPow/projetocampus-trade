@@ -200,3 +200,15 @@ def buscar_produto(produto_id: int, db: Session = Depends(get_db)):
     if not produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     return produto
+
+# Frontend CORS Junta o backend com o frontend
+from fastapi.middleware.cors import CORSMiddleware
+
+# Depois da linha app = FastAPI(...):
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
